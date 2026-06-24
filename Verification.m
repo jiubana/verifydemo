@@ -49,13 +49,20 @@
 @property (nonatomic, copy) NSString *lastAnnouncementTitle;
 @property (nonatomic, copy) NSString *lastAnnouncementMsg;
 @property (nonatomic, copy) void(^lastAnnouncementAction)(void);
+
+- (void)startVerificationFlowWithManualFlag:(BOOL)isManual;
+- (void)executeActualResponseHandling:(BOOL)success data:(NSDictionary *)root msg:(NSString *)msg isManual:(BOOL)isManual;
+- (NSTimeInterval)timeElapsedSinceLaunch;
 @end
 
 @implementation Verification
 
 #pragma mark - Initialization
 
+static NSTimeInterval gLaunchTimestamp = 0;
+
 + (void)load {
+    gLaunchTimestamp = [NSDate timeIntervalSinceReferenceDate];
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSLog(@"[JiubanAuth] Framework loaded. Listening for App Launch...");
@@ -69,6 +76,11 @@
                                                      name:UIApplicationDidBecomeActiveNotification
                                                    object:nil];
     });
+}
+
+- (NSTimeInterval)timeElapsedSinceLaunch {
+    if (gLaunchTimestamp == 0) return 0;
+    return [NSDate timeIntervalSinceReferenceDate] - gLaunchTimestamp;
 }
 
 + (instancetype)sharedInstance {
@@ -117,24 +129,10 @@
 // ----------------------------------------------------------------
 
 + (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    // 读取缓存的延迟时间，默认不延迟 (0 秒)
-    double delay = [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
-    if (delay < 0.0) delay = 0.0;
-    
-    NSLog(@"[JiubanAuth] Read launch delay from cache: %.2f seconds", delay);
-    
-    if (delay > 0.0) {
-        NSLog(@"[JiubanAuth] Scheduling startVerificationFlow with delay: %.2f seconds", delay);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            NSLog(@"[JiubanAuth] Delay finished. Launching startVerificationFlow now.");
-            [[Verification sharedInstance] startVerificationFlow];
-        });
-    } else {
-        NSLog(@"[JiubanAuth] No delay configured. Launching startVerificationFlow immediately.");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[Verification sharedInstance] startVerificationFlow];
-        });
-    }
+    NSLog(@"[JiubanAuth] App finished launching. Starting verification flow immediately.");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[Verification sharedInstance] startVerificationFlow];
+    });
 }
 
 #pragma mark - Verification Flow
@@ -142,8 +140,16 @@
 #pragma mark - Verification Flow
 
 - (void)startVerificationFlow {
-    // 强制先展示“懒加载”遮罩，同步云端动态配置
-    [self showLoadingToast:@"正在同步云端配置..."];
+    [self startVerificationFlowWithManualFlag:NO];
+}
+
+- (void)startVerificationFlowWithManualFlag:(BOOL)isManual {
+    double cachedDelay = isManual ? 0.0 : [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
+    if (cachedDelay <= 0.0) {
+        [self showLoadingToast:@"正在同步云端配置..."];
+    } else {
+        NSLog(@"[JiubanAuth] Cached delay is %.2f, fetching config silently in background.", cachedDelay);
+    }
     
     // 获取缓存
     NSDictionary *cache = [self loadVerificationCache];
@@ -152,9 +158,8 @@
     // 无论有无卡密，都先联网 Init 拉取公告和链接
     [self apiInitWithCard:savedCard completion:^(BOOL success, NSDictionary *data, NSString *msg) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self hideLoadingToast];
             // 此时配置已同步，handleServerResponse 会根据 status 决定下一步
-            [self handleServerResponse:success data:data msg:msg isManual:NO];
+            [self handleServerResponse:success data:data msg:msg isManual:isManual];
         });
     }];
 }
@@ -170,6 +175,33 @@
     } else if (root && [root isKindOfClass:[NSDictionary class]]) {
         [self updateConfig:root];
     }
+    
+    // 获取最新的 launch_delay
+    double actualDelay = [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
+    if (actualDelay < 0.0) actualDelay = 0.0;
+    
+    NSTimeInterval elapsed = [self timeElapsedSinceLaunch];
+    NSTimeInterval remainingDelay = actualDelay - elapsed;
+    
+    NSLog(@"[JiubanAuth] Server launch_delay: %.2f, elapsed since launch: %.2f, remaining: %.2f", actualDelay, elapsed, remainingDelay);
+    
+    if (!isManual && remainingDelay > 0.0) {
+        // 如果有剩余延迟，且不是手动操作，我们需要隐藏 loading 框（如果在显示），并在延迟结束后再处理
+        [self hideLoadingToast];
+        
+        NSLog(@"[JiubanAuth] Scheduling verification UI after remaining delay: %.2f seconds", remainingDelay);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remainingDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self executeActualResponseHandling:success data:root msg:msg isManual:isManual];
+        });
+    } else {
+        // 无需延迟，或者手动触发，直接隐藏 loading 框并执行
+        [self hideLoadingToast];
+        [self executeActualResponseHandling:success data:root msg:msg isManual:isManual];
+    }
+}
+
+- (void)executeActualResponseHandling:(BOOL)success data:(NSDictionary *)root msg:(NSString *)msg isManual:(BOOL)isManual {
+    NSDictionary *payload = [root isKindOfClass:[NSDictionary class]] ? root[@"data"] : nil;
     
     if (!success) {
         // 网络/物理层面的连接失败 (如：联网权限未下发、离线、超时)
@@ -540,7 +572,7 @@
     
     // 重试
     [alert addAction:[UIAlertAction actionWithTitle:@"重试连接" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self startVerificationFlow];
+        [self startVerificationFlowWithManualFlag:YES];
     }]];
     
     // 输入卡密 (新增，允许用户在异常状态下输入新卡密)
@@ -576,7 +608,7 @@
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"联网权限提示" message:fullMsg preferredStyle:UIAlertControllerStyleAlert];
     
     [alert addAction:[UIAlertAction actionWithTitle:@"重试连接" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-        [self startVerificationFlow];
+        [self startVerificationFlowWithManualFlag:YES];
     }]];
     
     [alert addAction:[UIAlertAction actionWithTitle:@"输入卡密" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
