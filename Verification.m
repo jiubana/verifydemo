@@ -50,9 +50,16 @@
 @property (nonatomic, copy) NSString *lastAnnouncementMsg;
 @property (nonatomic, copy) void(^lastAnnouncementAction)(void);
 
+@property (nonatomic, assign) BOOL hasFetchedConfig;
+@property (nonatomic, strong) NSTimer *retryTimer;
+
 - (void)startVerificationFlowWithManualFlag:(BOOL)isManual;
 - (void)executeActualResponseHandling:(BOOL)success data:(NSDictionary *)root msg:(NSString *)msg isManual:(BOOL)isManual;
 - (NSTimeInterval)timeElapsedSinceLaunch;
+- (void)performVerificationCheckWithManualFlag:(BOOL)isManual;
+- (void)startRetryTimer;
+- (void)stopRetryTimer;
+- (void)onRetryTimerTick;
 @end
 
 @implementation Verification
@@ -137,8 +144,6 @@ static NSTimeInterval gLaunchTimestamp = 0;
 
 #pragma mark - Verification Flow
 
-#pragma mark - Verification Flow
-
 - (void)startVerificationFlow {
     [self startVerificationFlowWithManualFlag:NO];
 }
@@ -149,26 +154,96 @@ static NSTimeInterval gLaunchTimestamp = 0;
         if ([[NSUserDefaults standardUserDefaults] objectForKey:@"jb_launch_delay"]) {
             cachedDelay = [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
         } else {
-            cachedDelay = 5.0; // 首次启动默认延迟 5 秒，防止首发立即弹窗或网络解析慢闪屏
+            cachedDelay = 10.0; // 首次启动默认延迟 10 秒，给予充足的授权和后台重试时间
         }
     }
+    
+    self.hasFetchedConfig = NO;
+    
     if (cachedDelay <= 0.0) {
         [self showLoadingToast:@"正在同步云端配置..."];
     } else {
-        NSLog(@"[JiubanAuth] Cached delay is %.2f, fetching config silently in background.", cachedDelay);
+        NSLog(@"[JiubanAuth] Cached/Default delay is %.2f, fetching config silently in background.", cachedDelay);
+        
+        // 自动流程下，如果存在延迟，我们设定一个最终超时机制：如果在延迟截止时依然没有成功获取配置，则强制阻断
+        NSTimeInterval elapsed = [self timeElapsedSinceLaunch];
+        NSTimeInterval remainingDelay = cachedDelay - elapsed;
+        if (remainingDelay > 0.0) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remainingDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (!self.hasFetchedConfig && !self.isVerified) {
+                    NSLog(@"[JiubanAuth] Launch delay deadline reached without config. Enforcing network block.");
+                    [self stopRetryTimer];
+                    [self executeActualResponseHandling:NO data:nil msg:@"似乎已断开与互联网的连接。" isManual:NO];
+                }
+            });
+        }
     }
     
+    [self performVerificationCheckWithManualFlag:isManual];
+}
+
+- (void)performVerificationCheckWithManualFlag:(BOOL)isManual {
     // 获取缓存
     NSDictionary *cache = [self loadVerificationCache];
     NSString *savedCard = cache[@"card_code"];
     
-    // 无论有无卡密，都先联网 Init 拉取公告和链接
     [self apiInitWithCard:savedCard completion:^(BOOL success, NSDictionary *data, NSString *msg) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            // 此时配置已同步，handleServerResponse 会根据 status 决定下一步
-            [self handleServerResponse:success data:data msg:msg isManual:isManual];
+            if (success) {
+                // 成功与服务器建立通讯，停止后台重试定时器
+                [self stopRetryTimer];
+                self.hasFetchedConfig = YES;
+                [self handleServerResponse:YES data:data msg:msg isManual:isManual];
+            } else {
+                // 失败了（可能是网络未授权或断网）
+                if (isManual) {
+                    // 如果是手动重试，直接报错弹窗，不进行后台静默重试
+                    [self handleServerResponse:NO data:data msg:msg isManual:isManual];
+                } else {
+                    // 如果是自动流程，启动后台重试定时器（如果还没启动）
+                    [self startRetryTimer];
+                    
+                    // 检查是否已经过了最后的延迟期限
+                    double actualDelay = 10.0;
+                    if ([[NSUserDefaults standardUserDefaults] objectForKey:@"jb_launch_delay"]) {
+                        actualDelay = [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
+                    }
+                    if (actualDelay < 0.0) actualDelay = 0.0;
+                    
+                    NSTimeInterval elapsed = [self timeElapsedSinceLaunch];
+                    if (elapsed >= actualDelay) {
+                        // 已经超时，必须弹窗阻断
+                        [self stopRetryTimer];
+                        [self handleServerResponse:NO data:data msg:msg isManual:isManual];
+                    } else {
+                        // 还没超时，继续静默在后台重试，此时先隐藏 loading 框（如果在显示）
+                        [self hideLoadingToast];
+                    }
+                }
+            }
         });
     }];
+}
+
+- (void)startRetryTimer {
+    if (self.retryTimer) return;
+    self.retryTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(onRetryTimerTick) userInfo:nil repeats:YES];
+}
+
+- (void)stopRetryTimer {
+    if (self.retryTimer) {
+        [self.retryTimer invalidate];
+        self.retryTimer = nil;
+    }
+}
+
+- (void)onRetryTimerTick {
+    if (self.hasFetchedConfig || self.isVerified) {
+        [self stopRetryTimer];
+        return;
+    }
+    // 继续在后台静默发起请求
+    [self performVerificationCheckWithManualFlag:NO];
 }
 
 // 统一处理服务器返回结果
@@ -188,7 +263,7 @@ static NSTimeInterval gLaunchTimestamp = 0;
     if ([[NSUserDefaults standardUserDefaults] objectForKey:@"jb_launch_delay"]) {
         actualDelay = [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
     } else {
-        actualDelay = 5.0; // 首次启动默认延迟 5 秒
+        actualDelay = 10.0; // 首次启动默认延迟 10 秒
     }
     if (actualDelay < 0.0) actualDelay = 0.0;
     
