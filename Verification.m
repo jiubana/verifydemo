@@ -144,7 +144,14 @@ static NSTimeInterval gLaunchTimestamp = 0;
 }
 
 - (void)startVerificationFlowWithManualFlag:(BOOL)isManual {
-    double cachedDelay = isManual ? 0.0 : [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
+    double cachedDelay = 0.0;
+    if (!isManual) {
+        if ([[NSUserDefaults standardUserDefaults] objectForKey:@"jb_launch_delay"]) {
+            cachedDelay = [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
+        } else {
+            cachedDelay = 5.0; // 首次启动默认延迟 5 秒，防止首发立即弹窗或网络解析慢闪屏
+        }
+    }
     if (cachedDelay <= 0.0) {
         [self showLoadingToast:@"正在同步云端配置..."];
     } else {
@@ -177,7 +184,12 @@ static NSTimeInterval gLaunchTimestamp = 0;
     }
     
     // 获取最新的 launch_delay
-    double actualDelay = [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
+    double actualDelay = 0.0;
+    if ([[NSUserDefaults standardUserDefaults] objectForKey:@"jb_launch_delay"]) {
+        actualDelay = [[NSUserDefaults standardUserDefaults] doubleForKey:@"jb_launch_delay"];
+    } else {
+        actualDelay = 5.0; // 首次启动默认延迟 5 秒
+    }
     if (actualDelay < 0.0) actualDelay = 0.0;
     
     NSTimeInterval elapsed = [self timeElapsedSinceLaunch];
