@@ -129,8 +129,8 @@ static NSTimeInterval gLaunchTimestamp = 0;
 // ----------------------------------------------------------------
 
 + (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    NSLog(@"[JiubanAuth] App finished launching. Starting verification flow immediately.");
-    dispatch_async(dispatch_get_main_queue(), ^{
+    NSLog(@"[JiubanAuth] App finished launching. Delaying initial flow by 1.5s to let the iOS system network prompt display.");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[Verification sharedInstance] startVerificationFlow];
     });
 }
@@ -217,7 +217,7 @@ static NSTimeInterval gLaunchTimestamp = 0;
     
     if (!success) {
         // 网络/物理层面的连接失败 (如：联网权限未下发、离线、超时)
-        if (msg && ([msg containsString:@"Internet"] || [msg containsString:@"offline"] || [msg containsString:@"timed out"] || [msg containsString:@"Network"])) {
+        if (msg && ([msg containsString:@"Internet"] || [msg containsString:@"offline"] || [msg containsString:@"timed out"] || [msg containsString:@"Network"] || [msg containsString:@"连接"] || [msg containsString:@"网络"] || [msg containsString:@"断开"] || [msg containsString:@"超时"])) {
             [self showNetworkErrorAlert:msg];
         } else {
             [self showBlockingErrorAlert:msg ?: @"服务器连接失败"];
