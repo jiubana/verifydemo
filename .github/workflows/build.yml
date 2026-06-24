@@ -1,0 +1,41 @@
+name: Build iOS Dylib
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build Dylib
+      run: |
+        SDK="iphoneos"
+        MIN_VERSION="11.0"
+        ARCHS="arm64"
+        OUTPUT="iOSAuthSystem.dylib"
+        
+        echo "Building for $SDK (Min iOS $MIN_VERSION, Archs $ARCHS)..."
+        
+        clang -dynamiclib \
+            -arch $ARCHS \
+            -isysroot $(xcrun --sdk $SDK --show-sdk-path) \
+            -miphoneos-version-min=$MIN_VERSION \
+            -framework Foundation \
+            -framework UIKit \
+            -fobjc-arc \
+            Verification.m \
+            -o $OUTPUT
+        
+        echo "Build successful!"
+        ls -lh $OUTPUT
+
+    - name: Upload Dylib
+      uses: actions/upload-artifact@v4
+      with:
+        name: iOSAuthSystem-dylib
+        path: iOSAuthSystem.dylib

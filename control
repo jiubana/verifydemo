@@ -1,0 +1,9 @@
+Package: com.jiubana.iosauthdemo
+Name: iOSAuthSystem
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: iOS Authorization System for QQ
+Maintainer: jiubana
+Author: jiubana
+Section: Tweaks
+Depends: mobilesubstrate
